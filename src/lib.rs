@@ -151,8 +151,9 @@ impl Discord {
 				.body(&serde_json::to_string(&map)?)
 				.send(),
 		)?;
-		let mut json: BTreeMap<String, String> = serde_json::from_reader(response)?;
-		let token = match json.remove("token") {
+		let mut json: BTreeMap<String, serde_json::Value> = serde_json::from_reader(response)?;
+		let token = match json.remove("token").and_then(|value| value.as_str().map(String::from))
+		{
 			Some(token) => token,
 			None => {
 				return Err(Error::Protocol(
