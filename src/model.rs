@@ -849,6 +849,8 @@ pub struct Message {
 	pub embeds: Vec<Value>,
 
 	pub flags: MessageFlags,
+	//Reply
+	pub referenced_message: Box<Option<Message>>
 }
 serial_decode!(Message);
 

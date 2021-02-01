@@ -88,7 +88,7 @@ const USER_AGENT: &'static str = concat!(
 );
 macro_rules! api_concat {
 	($e:expr) => {
-		concat!("https://discord.com/api/v6", $e)
+		concat!("https://discord.com/api/v8", $e)
 	};
 }
 macro_rules! status_concat {
@@ -628,7 +628,7 @@ impl Discord {
 		mut file: R,
 		filename: &str,
 	) -> Result<Message> {
-		use std::io::Write;
+		// use std::io::Write;
 
 		let url = match hyper::Url::parse(&format!(api_concat!("/channels/{}/messages"), channel)) {
 			Ok(url) => url,
@@ -648,22 +648,19 @@ impl Discord {
 				vec![(Attr::Ext("boundary".into()), Value::Ext(bound.into()))],
 			)
 		}
+		//SSL
+		let ssl = hyper_native_tls::NativeTlsClient::new().unwrap();
+		let connector = hyper::net::HttpsConnector::new(ssl);
+		let client = hyper::client::Client::with_connector(connector);
+		let request = client.request(hyper::method::Method::Post, url)
+				.header(hyper::header::Authorization(self.token.clone()))
+				.header(hyper::header::UserAgent(USER_AGENT.to_owned()))
+				.header(hyper::header::ContentType(multipart_mime(&http_buffer.boundary)))
+				.body(&http_buffer.buf[..]);
+		let response = request.send();
+		// request.write(&http_buffer.buf[..])?;
 
-		let mut request = hyper::client::Request::new(hyper::method::Method::Post, url)?;
-		request
-			.headers_mut()
-			.set(hyper::header::Authorization(self.token.clone()));
-		request
-			.headers_mut()
-			.set(hyper::header::UserAgent(USER_AGENT.to_owned()));
-		request
-			.headers_mut()
-			.set(hyper::header::ContentType(multipart_mime(
-				&http_buffer.boundary,
-			)));
-		let mut request = request.start()?;
-		request.write(&http_buffer.buf[..])?;
-		Message::decode(serde_json::from_reader(check_status(request.send())?)?)
+		Message::decode(serde_json::from_reader(check_status(response)?)?)
 	}
 
 	/// Acknowledge this message as "read" by this client.
