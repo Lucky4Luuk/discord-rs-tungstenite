@@ -88,7 +88,7 @@ const USER_AGENT: &'static str = concat!(
 );
 macro_rules! api_concat {
 	($e:expr) => {
-		concat!("https://discord.com/api/v6", $e)
+		concat!("https://discord.com/api/v8", $e)
 	};
 }
 macro_rules! status_concat {
@@ -481,6 +481,46 @@ impl Discord {
 	///
 	/// The `nonce` will be returned in the result and also transmitted to other
 	/// clients. The empty string is a good default if you don't care.
+	pub fn send_message_ex<F: FnOnce(SendMessage) -> SendMessage>(
+		&self,
+		channel: ChannelId,
+		f: F,
+	) -> Result<Message> {
+		let map = SendMessage::__build(f);
+		let body = serde_json::to_string(&map)?;
+		let response = request!(self, post(body), "/channels/{}/messages", channel);
+		from_reader(response)
+	}
+
+	/// Edit a previously posted message.
+	///
+	/// Requires that either the message was posted by this user, or this user
+	/// has permission to manage other members' messages.
+	///
+	/// Not all fields can be edited; see the [docs] for more.
+	/// [docs]: https://discord.com/developers/docs/resources/channel#edit-message
+	pub fn edit_message_ex<F: FnOnce(SendMessage) -> SendMessage>(
+		&self,
+		channel: ChannelId,
+		message: MessageId,
+		f: F,
+	) -> Result<Message> {
+		let map = SendMessage::__build(f);
+		let body = serde_json::to_string(&map)?;
+		let response = request!(
+			self,
+			patch(body),
+			"/channels/{}/messages/{}",
+			channel,
+			message
+		);
+		from_reader(response)
+	}
+
+	/// Send a message to a given channel.
+	///
+	/// The `nonce` will be returned in the result and also transmitted to other
+	/// clients. The empty string is a good default if you don't care.
 	pub fn send_message(
 		&self,
 		channel: ChannelId,
@@ -488,14 +528,7 @@ impl Discord {
 		nonce: &str,
 		tts: bool,
 	) -> Result<Message> {
-		let map = json! {{
-			"content": text,
-			"nonce": nonce,
-			"tts": tts,
-		}};
-		let body = serde_json::to_string(&map)?;
-		let response = request!(self, post(body), "/channels/{}/messages", channel);
-		from_reader(response)
+		self.send_message_ex(channel, |b| b.content(text).nonce(nonce).tts(tts))
 	}
 
 	/// Edit a previously posted message.
@@ -508,16 +541,7 @@ impl Discord {
 		message: MessageId,
 		text: &str,
 	) -> Result<Message> {
-		let map = json! {{ "content": text }};
-		let body = serde_json::to_string(&map)?;
-		let response = request!(
-			self,
-			patch(body),
-			"/channels/{}/messages/{}",
-			channel,
-			message
-		);
-		from_reader(response)
+		self.edit_message_ex(channel, message, |b| b.content(text))
 	}
 
 	/// Delete a previously posted message.
@@ -580,13 +604,7 @@ impl Discord {
 		text: &str,
 		f: F,
 	) -> Result<Message> {
-		let map = json! {{
-			"content": text,
-			"embed": EmbedBuilder::__build(f),
-		}};
-		let body = serde_json::to_string(&map)?;
-		let response = request!(self, post(body), "/channels/{}/messages", channel);
-		from_reader(response)
+		self.send_message_ex(channel, |b| b.content(text).embed(f))
 	}
 
 	/// Edit the embed portion of a previously posted message.
@@ -598,18 +616,7 @@ impl Discord {
 		message: MessageId,
 		f: F,
 	) -> Result<Message> {
-		let map = json! {{
-			"embed": EmbedBuilder::__build(f)
-		}};
-		let body = serde_json::to_string(&map)?;
-		let response = request!(
-			self,
-			patch(body),
-			"/channels/{}/messages/{}",
-			channel,
-			message
-		);
-		from_reader(response)
+		self.edit_message_ex(channel, message, |b| b.embed(f))
 	}
 
 	/// Send a file attached to a message on a given channel.
@@ -622,7 +629,7 @@ impl Discord {
 		mut file: R,
 		filename: &str,
 	) -> Result<Message> {
-		use std::io::Write;
+		// use std::io::Write;
 
 		let url = match hyper::Url::parse(&format!(api_concat!("/channels/{}/messages"), channel)) {
 			Ok(url) => url,
@@ -642,22 +649,19 @@ impl Discord {
 				vec![(Attr::Ext("boundary".into()), Value::Ext(bound.into()))],
 			)
 		}
+		//SSL
+		let ssl = hyper_native_tls::NativeTlsClient::new().unwrap();
+		let connector = hyper::net::HttpsConnector::new(ssl);
+		let client = hyper::client::Client::with_connector(connector);
+		let request = client.request(hyper::method::Method::Post, url)
+				.header(hyper::header::Authorization(self.token.clone()))
+				.header(hyper::header::UserAgent(USER_AGENT.to_owned()))
+				.header(hyper::header::ContentType(multipart_mime(&http_buffer.boundary)))
+				.body(&http_buffer.buf[..]);
+		let response = request.send();
+		// request.write(&http_buffer.buf[..])?;
 
-		let mut request = hyper::client::Request::new(hyper::method::Method::Post, url)?;
-		request
-			.headers_mut()
-			.set(hyper::header::Authorization(self.token.clone()));
-		request
-			.headers_mut()
-			.set(hyper::header::UserAgent(USER_AGENT.to_owned()));
-		request
-			.headers_mut()
-			.set(hyper::header::ContentType(multipart_mime(
-				&http_buffer.boundary,
-			)));
-		let mut request = request.start()?;
-		request.write(&http_buffer.buf[..])?;
-		Message::decode(serde_json::from_reader(check_status(request.send())?)?)
+		Message::decode(serde_json::from_reader(check_status(response)?)?)
 	}
 
 	/// Acknowledge this message as "read" by this client.
