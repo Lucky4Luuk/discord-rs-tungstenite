@@ -60,6 +60,7 @@ impl WebSocketTyped {
 
 	pub fn recv_gateway_event(&self) -> Result<GatewayEvent> {
 		let json = self.recv_json()?;
+		println!("json: {:#?}", json);
 		let event = GatewayEvent::decode(json)?;
 		Ok(event)
 	}
@@ -185,7 +186,11 @@ impl Connection {
 		// let response = Client::connect(url)?.send()?;
 		// response.validate()?;
 		// let (mut sender, mut receiver) = response.begin().split();
-		let (websocket, response) = tungstenite::connect(url)?;
+		let maybe_conn = tungstenite::connect(url);
+		if let Err(tungstenite::Error::Http(e)) = &maybe_conn {
+			error!("{:?}", std::str::from_utf8(&e.body().as_ref().unwrap()));
+		}
+		let (websocket, response) = maybe_conn?;
 		let websocket = WebSocketTyped::new(websocket);
 
 		// send the handshake
@@ -577,7 +582,7 @@ impl Drop for Connection {
 
 #[inline]
 fn build_gateway_url(base: &str) -> Result<http::Uri> {
-	format!("{}?v={}", base, GATEWAY_VERSION).parse::<http::Uri>().map_err(|_| Error::Other("Invalid gateway URL"))
+	format!("{}", base).parse::<http::Uri>().map_err(|_| Error::Other("Invalid gateway URL"))
 }
 
 fn keepalive(interval: u64, mut sender: WebSocketTyped, channel: mpsc::Receiver<Status>) {

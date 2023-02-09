@@ -31,7 +31,7 @@ extern crate base64;
 extern crate chrono;
 extern crate flate2;
 extern crate hyper;
-extern crate hyper_native_tls;
+// extern crate hyper_native_tls;
 extern crate multipart;
 extern crate serde;
 extern crate tungstenite;
@@ -88,7 +88,7 @@ const USER_AGENT: &'static str = concat!(
 );
 macro_rules! api_concat {
 	($e:expr) => {
-		concat!("https://discord.com/api/v8", $e)
+		concat!("https://chat.homies.gay/api", $e)
 	};
 }
 macro_rules! status_concat {
@@ -129,7 +129,8 @@ pub struct Discord {
 }
 
 fn tls_client() -> hyper::Client {
-	let tls = hyper_native_tls::NativeTlsClient::new().expect("Error initializing NativeTlsClient");
+	// let tls = hyper_native_tls::NativeTlsClient::new().expect("Error initializing NativeTlsClient");
+	let tls = hyper_rustls::TlsClient::new();
 	let connector = hyper::net::HttpsConnector::new(tls);
 	hyper::Client::with_connector(connector)
 }
@@ -650,7 +651,8 @@ impl Discord {
 			)
 		}
 		//SSL
-		let ssl = hyper_native_tls::NativeTlsClient::new().unwrap();
+		// let ssl = hyper_native_tls::NativeTlsClient::new().unwrap();
+		let ssl = hyper_rustls::TlsClient::new();
 		let connector = hyper::net::HttpsConnector::new(ssl);
 		let client = hyper::client::Client::with_connector(connector);
 		let request = client.request(hyper::method::Method::Post, url)
@@ -1481,6 +1483,7 @@ impl Discord {
 	/// received.
 	pub fn connection_builder(&self) -> Result<connection::ConnectionBuilder> {
 		let url = self.get_gateway_url()?;
+		println!("url: {}", url);
 		Ok(connection::ConnectionBuilder::new(url, &self.token))
 	}
 
