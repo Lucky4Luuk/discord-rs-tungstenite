@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::error::Error as StdError;
 use std::fmt::Display;
 use std::io::Error as IoError;
-use websocket::result::WebSocketError;
+use tungstenite::error::Error as WebSocketError;
 
 /// Discord API `Result` alias type.
 pub type Result<T> = ::std::result::Result<T, Error>;

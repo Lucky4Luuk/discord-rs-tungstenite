@@ -34,7 +34,7 @@ extern crate hyper;
 extern crate hyper_native_tls;
 extern crate multipart;
 extern crate serde;
-extern crate websocket;
+extern crate tungstenite;
 #[macro_use]
 extern crate serde_derive;
 #[macro_use]
@@ -1676,73 +1676,12 @@ impl Timer {
 	}
 }
 
-trait ReceiverExt {
-	fn recv_json<F, T>(&mut self, decode: F) -> Result<T>
-	where
-		F: FnOnce(serde_json::Value) -> Result<T>;
-}
-
-trait SenderExt {
-	fn send_json(&mut self, value: &serde_json::Value) -> Result<()>;
-}
-
-impl ReceiverExt for websocket::client::Receiver<websocket::stream::WebSocketStream> {
-	fn recv_json<F, T>(&mut self, decode: F) -> Result<T>
-	where
-		F: FnOnce(serde_json::Value) -> Result<T>,
-	{
-		use websocket::message::{Message, Type};
-		use websocket::ws::receiver::Receiver;
-		let message: Message = self.recv_message()?;
-		if message.opcode == Type::Close {
-			Err(Error::Closed(
-				message.cd_status_code,
-				String::from_utf8_lossy(&message.payload).into_owned(),
-			))
-		} else if message.opcode == Type::Binary || message.opcode == Type::Text {
-			let mut payload_vec;
-			let payload = if message.opcode == Type::Binary {
-				use std::io::Read;
-				payload_vec = Vec::new();
-				flate2::read::ZlibDecoder::new(&message.payload[..])
-					.read_to_end(&mut payload_vec)?;
-				&payload_vec[..]
-			} else {
-				&message.payload[..]
-			};
-			serde_json::from_reader(payload)
-				.map_err(From::from)
-				.and_then(decode)
-				.map_err(|e| {
-					warn!("Error decoding: {}", String::from_utf8_lossy(payload));
-					e
-				})
-		} else {
-			Err(Error::Closed(
-				None,
-				String::from_utf8_lossy(&message.payload).into_owned(),
-			))
-		}
-	}
-}
-
-impl SenderExt for websocket::client::Sender<websocket::stream::WebSocketStream> {
-	fn send_json(&mut self, value: &serde_json::Value) -> Result<()> {
-		use websocket::message::Message;
-		use websocket::ws::sender::Sender;
-		serde_json::to_string(value)
-			.map(Message::text)
-			.map_err(Error::from)
-			.and_then(|m| self.send_message(&m).map_err(Error::from))
-	}
-}
-
 mod internal {
 	pub enum Status {
 		SendMessage(::serde_json::Value),
 		Sequence(u64),
 		ChangeInterval(u64),
-		ChangeSender(::websocket::client::Sender<::websocket::stream::WebSocketStream>),
+		ChangeSender(::connection::WebSocketTyped),
 		Aborted,
 	}
 }

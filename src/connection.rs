@@ -1,9 +1,12 @@
 #[cfg(feature = "voice")]
 use std::collections::HashMap;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
-use websocket::client::{Client, Receiver, Sender};
-use websocket::stream::WebSocketStream;
+// use websocket::client::{Client, Receiver, Sender};
+// use websocket::stream::WebSocketStream;
+use tungstenite::*;
+use tungstenite::stream::MaybeTlsStream;
 
 use serde_json;
 
@@ -11,9 +14,56 @@ use internal::Status;
 use model::*;
 #[cfg(feature = "voice")]
 use voice::VoiceConnection;
-use {Error, ReceiverExt, Result, SenderExt};
+use {Error, Result};
 
 const GATEWAY_VERSION: u64 = 6;
+
+pub type WebSocketRaw = WebSocket<MaybeTlsStream<std::net::TcpStream>>;
+
+#[derive(Clone)]
+pub struct WebSocketTyped(Arc<Mutex<WebSocketRaw>>);
+
+impl WebSocketTyped {
+	pub fn new(raw: WebSocketRaw) -> Self {
+		Self(Arc::new(Mutex::new(raw)))
+	}
+
+	pub fn close(&self) {
+		self.0.lock().unwrap().close(None);
+	}
+
+	fn read_message(&self) -> Result<tungstenite::protocol::Message> {
+		let mut ws = self.0.lock().unwrap();
+		let msg = ws.read_message().map_err(|e| Error::WebSocket(e));
+		drop(ws);
+		msg
+	}
+
+	pub fn send_text(&self, text: &str) -> Result<()> {
+		let mut ws = self.0.lock().unwrap();
+		ws.write_message(tungstenite::protocol::Message::text(text));
+		ws.write_pending()?;
+		drop(ws);
+		Ok(())
+	}
+
+	pub fn send_json(&self, json: &serde_json::Value) -> Result<()> {
+		let text = serde_json::to_string(json)?;
+		self.send_text(&text)
+	}
+
+	pub fn recv_json(&self) -> Result<serde_json::Value> {
+		let msg = self.read_message()?;
+		let text = msg.to_text()?.to_string();
+		serde_json::from_str(&text).map_err(|e| Error::Json(e))
+	}
+
+	pub fn recv_gateway_event(&self) -> Result<GatewayEvent> {
+		let json = self.recv_json()?;
+		let event = GatewayEvent::decode(json)?;
+		Ok(event)
+	}
+}
 
 #[cfg(feature = "voice")]
 macro_rules! finish_connection {
@@ -99,7 +149,7 @@ impl<'a> ConnectionBuilder<'a> {
 /// Websocket connection to the Discord servers.
 pub struct Connection {
 	keepalive_channel: mpsc::Sender<Status>,
-	receiver: Receiver<WebSocketStream>,
+	websocket: WebSocketTyped,
 	#[cfg(feature = "voice")]
 	voice_handles: HashMap<Option<ServerId>, VoiceConnection>,
 	#[cfg(feature = "voice")]
@@ -132,16 +182,18 @@ impl Connection {
 		trace!("Gateway: {}", base_url);
 		// establish the websocket connection
 		let url = build_gateway_url(base_url)?;
-		let response = Client::connect(url)?.send()?;
-		response.validate()?;
-		let (mut sender, mut receiver) = response.begin().split();
+		// let response = Client::connect(url)?.send()?;
+		// response.validate()?;
+		// let (mut sender, mut receiver) = response.begin().split();
+		let (websocket, response) = tungstenite::connect(url)?;
+		let websocket = WebSocketTyped::new(websocket);
 
 		// send the handshake
-		sender.send_json(&identify)?;
+		websocket.send_json(&identify)?;
 
 		// read the Hello and spawn the keepalive thread
 		let heartbeat_interval;
-		match receiver.recv_json(GatewayEvent::decode)? {
+		match websocket.recv_gateway_event()? {
 			GatewayEvent::Hello(interval) => heartbeat_interval = interval,
 			other => {
 				debug!("Unexpected event: {:?}", other);
@@ -150,6 +202,7 @@ impl Connection {
 		}
 
 		let (tx, rx) = mpsc::channel();
+		let sender = websocket.clone();
 		::std::thread::Builder::new()
 			.name("Discord Keepalive".into())
 			.spawn(move || keepalive(heartbeat_interval, sender, rx))?;
@@ -157,7 +210,7 @@ impl Connection {
 		// read the Ready event
 		let sequence;
 		let ready;
-		match receiver.recv_json(GatewayEvent::decode)? {
+		match websocket.recv_gateway_event()? {
 			GatewayEvent::Dispatch(seq, Event::Ready(event)) => {
 				sequence = seq;
 				ready = event;
@@ -165,7 +218,7 @@ impl Connection {
 			GatewayEvent::InvalidateSession => {
 				debug!("Session invalidated, reidentifying");
 				let _ = tx.send(Status::SendMessage(identify.clone()));
-				match receiver.recv_json(GatewayEvent::decode)? {
+				match websocket.recv_gateway_event()? {
 					GatewayEvent::Dispatch(seq, Event::Ready(event)) => {
 						sequence = seq;
 						ready = event;
@@ -201,7 +254,7 @@ impl Connection {
 		Ok((
 			finish_connection!(
 				keepalive_channel: tx,
-				receiver: receiver,
+				websocket: websocket,
 				ws_url: base_url.to_owned(),
 				token: token.to_owned(),
 				session_id: Some(session_id),
@@ -286,7 +339,7 @@ impl Connection {
 	/// Receive an event over the websocket, blocking until one is available.
 	pub fn recv_event(&mut self) -> Result<Event> {
 		loop {
-			match self.receiver.recv_json(GatewayEvent::decode) {
+			match self.websocket.recv_gateway_event() {
 				Err(Error::WebSocket(err)) => {
 					warn!("Websocket error, reconnecting: {:?}", err);
 					// Try resuming if we haven't received an InvalidateSession
@@ -390,14 +443,10 @@ impl Connection {
 		::sleep_ms(1000);
 		trace!("Resuming...");
 		// close connection and re-establish
-		self.receiver
-			.get_mut()
-			.get_mut()
-			.shutdown(::std::net::Shutdown::Both)?;
+		self.websocket.close();
 		let url = build_gateway_url(&self.ws_url)?;
-		let response = Client::connect(url)?.send()?;
-		response.validate()?;
-		let (mut sender, mut receiver) = response.begin().split();
+		let (websocket, response) = tungstenite::connect(url)?;
+		let websocket = WebSocketTyped::new(websocket);
 
 		// send the resume request
 		let resume = json! {{
@@ -408,12 +457,12 @@ impl Connection {
 				"session_id": session_id,
 			}
 		}};
-		sender.send_json(&resume)?;
+		websocket.send_json(&resume)?;
 
 		// TODO: when Discord has implemented it, observe the RESUMING event here
 		let first_event;
 		loop {
-			match receiver.recv_json(GatewayEvent::decode)? {
+			match websocket.recv_gateway_event()? {
 				GatewayEvent::Hello(interval) => {
 					let _ = self
 						.keepalive_channel
@@ -432,7 +481,7 @@ impl Connection {
 				}
 				GatewayEvent::InvalidateSession => {
 					debug!("Session invalidated in resume, reidentifying");
-					sender.send_json(&self.identify)?;
+					websocket.send_json(&self.identify)?;
 				}
 				other => {
 					debug!("Unexpected event: {:?}", other);
@@ -442,7 +491,8 @@ impl Connection {
 		}
 
 		// switch everything to the new connection
-		self.receiver = receiver;
+		self.websocket = websocket;
+		let sender = self.websocket.clone();
 		let _ = self.keepalive_channel.send(Status::ChangeSender(sender));
 		Ok(first_event)
 	}
@@ -456,15 +506,7 @@ impl Connection {
 
 	// called from shutdown() and drop()
 	fn inner_shutdown(&mut self) -> Result<()> {
-		use std::io::Write;
-		use websocket::Sender as S;
-
-		// Hacky horror: get the WebSocketStream from the Receiver and formally close it
-		let stream = self.receiver.get_mut().get_mut();
-		Sender::new(stream.by_ref(), true)
-			.send_message(&::websocket::message::Message::close_because(1000, ""))?;
-		stream.flush()?;
-		stream.shutdown(::std::net::Shutdown::Both)?;
+		self.websocket.close();
 		self.keepalive_channel
 			.send(Status::Aborted)
 			.expect("Could not stop the keepalive thread, there will be a thread leak.");
@@ -473,12 +515,7 @@ impl Connection {
 
 	// called when we want to drop the connection with no fanfare
 	fn raw_shutdown(mut self) {
-		use std::io::Write;
-		{
-			let stream = self.receiver.get_mut().get_mut();
-			let _ = stream.flush();
-			let _ = stream.shutdown(::std::net::Shutdown::Both);
-		}
+		self.websocket.close();
 		::std::mem::forget(self); // don't call inner_shutdown()
 	}
 
@@ -539,12 +576,11 @@ impl Drop for Connection {
 }
 
 #[inline]
-fn build_gateway_url(base: &str) -> Result<::websocket::client::request::Url> {
-	::websocket::client::request::Url::parse(&format!("{}?v={}", base, GATEWAY_VERSION))
-		.map_err(|_| Error::Other("Invalid gateway URL"))
+fn build_gateway_url(base: &str) -> Result<http::Uri> {
+	format!("{}?v={}", base, GATEWAY_VERSION).parse::<http::Uri>().map_err(|_| Error::Other("Invalid gateway URL"))
 }
 
-fn keepalive(interval: u64, mut sender: Sender<WebSocketStream>, channel: mpsc::Receiver<Status>) {
+fn keepalive(interval: u64, mut sender: WebSocketTyped, channel: mpsc::Receiver<Status>) {
 	let mut timer = ::Timer::new(interval);
 	let mut last_sequence = 0;
 
@@ -583,5 +619,5 @@ fn keepalive(interval: u64, mut sender: Sender<WebSocketStream>, channel: mpsc::
 			}
 		}
 	}
-	let _ = sender.get_mut().shutdown(::std::net::Shutdown::Both);
+	let _ = sender.close();
 }
