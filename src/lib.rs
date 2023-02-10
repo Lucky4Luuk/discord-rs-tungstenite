@@ -30,8 +30,6 @@
 extern crate base64;
 extern crate chrono;
 extern crate flate2;
-extern crate hyper;
-// extern crate hyper_native_tls;
 extern crate multipart;
 extern crate serde;
 extern crate tungstenite;
@@ -49,6 +47,8 @@ extern crate byteorder;
 extern crate opus;
 #[cfg(feature = "voice")]
 extern crate sodiumoxide;
+
+pub use reqwest_wasm_compat as reqwest_wrapper;
 
 use std::collections::BTreeMap;
 use std::time;
@@ -100,7 +100,7 @@ macro_rules! status_concat {
 macro_rules! request {
 	($self_:ident, $method:ident($body:expr), $url:expr, $($rest:tt)*) => {{
 		let path = format!(api_concat!($url), $($rest)*);
-		$self_.request(&path, || $self_.client.$method(&path).body(&$body))?
+		$self_.request(&path, || $self_.client.$method(&path).body($body))?
 	}};
 	($self_:ident, $method:ident, $url:expr, $($rest:tt)*) => {{
 		let path = format!(api_concat!($url), $($rest)*);
@@ -108,7 +108,7 @@ macro_rules! request {
 	}};
 	($self_:ident, $method:ident($body:expr), $url:expr) => {{
 		let path = api_concat!($url);
-		$self_.request(path, || $self_.client.$method(path).body(&$body))?
+		$self_.request(path, || $self_.client.$method(path).body($body))?
 	}};
 	($self_:ident, $method:ident, $url:expr) => {{
 		let path = api_concat!($url);
@@ -124,15 +124,12 @@ macro_rules! request {
 /// the Discord REST API.
 pub struct Discord {
 	rate_limits: RateLimits,
-	client: hyper::Client,
+	client: reqwest_wrapper::Client,
 	token: String,
 }
 
-fn tls_client() -> hyper::Client {
-	// let tls = hyper_native_tls::NativeTlsClient::new().expect("Error initializing NativeTlsClient");
-	let tls = hyper_rustls::TlsClient::new();
-	let connector = hyper::net::HttpsConnector::new(tls);
-	hyper::Client::with_connector(connector)
+fn tls_client() -> reqwest_wrapper::Client {
+	reqwest_wrapper::Client::new()
 }
 
 impl Discord {
@@ -147,12 +144,11 @@ impl Discord {
 		let response = check_status(
 			client
 				.post(api_concat!("/auth/login"))
-				.header(hyper::header::ContentType::json())
-				.header(hyper::header::UserAgent(USER_AGENT.to_owned()))
-				.body(&serde_json::to_string(&map)?)
+				.header(reqwest_wrapper::header::USER_AGENT, USER_AGENT.to_owned())
+				.json(&map)
 				.send(),
 		)?;
-		let mut json: BTreeMap<String, serde_json::Value> = serde_json::from_reader(response)?;
+		let mut json: BTreeMap<String, serde_json::Value> = response.json()?;
 		let token = match json.remove("token").and_then(|value| value.as_str().map(String::from))
 		{
 			Some(token) => token,
@@ -210,13 +206,12 @@ impl Discord {
 			let response = check_status(
 				client
 					.post(api_concat!("/auth/login"))
-					.header(hyper::header::ContentType::json())
-					.header(hyper::header::UserAgent(USER_AGENT.to_owned()))
-					.header(hyper::header::Authorization(initial_token.clone()))
-					.body(&serde_json::to_string(&map)?)
+					.header(reqwest_wrapper::header::USER_AGENT, USER_AGENT.to_owned())
+					.header(reqwest_wrapper::header::AUTHORIZATION, initial_token.clone())
+					.json(&map)
 					.send(),
 			)?;
-			let mut json: BTreeMap<String, String> = serde_json::from_reader(response)?;
+			let mut json: BTreeMap<String, String> = response.json()?;
 			let token = match json.remove("token") {
 				Some(token) => token,
 				None => {
@@ -288,18 +283,17 @@ impl Discord {
 			"token": null,
 		}};
 		let body = serde_json::to_string(&map)?;
-		check_empty(request!(self, post(body), "/auth/logout"))
+		check_empty(request!(self, post(body.clone()), "/auth/logout"))
 	}
 
-	fn request<'a, F: Fn() -> hyper::client::RequestBuilder<'a>>(
+	fn request<F: Fn() -> reqwest_wrapper::RequestBuilder>(
 		&self,
 		url: &str,
 		f: F,
-	) -> Result<hyper::client::Response> {
+	) -> Result<reqwest_wrapper::Response> {
 		self.rate_limits.pre_check(url);
 		let f2 = || {
-			f().header(hyper::header::ContentType::json())
-				.header(hyper::header::Authorization(self.token.clone()))
+			f().header(reqwest_wrapper::header::AUTHORIZATION, self.token.clone())
 		};
 		let result = retry(&f2);
 		if let Ok(response) = result.as_ref() {
@@ -329,20 +323,20 @@ impl Discord {
 			"type": kind.name(),
 		}};
 		let body = serde_json::to_string(&map)?;
-		let response = request!(self, post(body), "/guilds/{}/channels", server);
-		Channel::decode(serde_json::from_reader(response)?)
+		let response = request!(self, post(body.clone()), "/guilds/{}/channels", server);
+		Channel::decode(response.json()?)
 	}
 
 	/// Get the list of channels in a server.
 	pub fn get_server_channels(&self, server: ServerId) -> Result<Vec<PublicChannel>> {
 		let response = request!(self, get, "/guilds/{}/channels", server);
-		decode_array(serde_json::from_reader(response)?, PublicChannel::decode)
+		decode_array(response.json()?, PublicChannel::decode)
 	}
 
 	/// Get information about a channel.
 	pub fn get_channel(&self, channel: ChannelId) -> Result<Channel> {
 		let response = request!(self, get, "/channels/{}", channel);
-		Channel::decode(serde_json::from_reader(response)?)
+		Channel::decode(response.json()?)
 	}
 
 	/// Edit a channel's details. See `EditChannel` for the editable fields.
@@ -391,14 +385,14 @@ impl Discord {
 		};
 		let map = EditChannel::__apply(f, map);
 		let body = serde_json::to_string(&map)?;
-		let response = request!(self, patch(body), "/channels/{}", channel);
-		PublicChannel::decode(serde_json::from_reader(response)?)
+		let response = request!(self, patch(body.clone()), "/channels/{}", channel);
+		PublicChannel::decode(response.json()?)
 	}
 
 	/// Delete a channel.
 	pub fn delete_channel(&self, channel: ChannelId) -> Result<Channel> {
 		let response = request!(self, delete, "/channels/{}", channel);
-		Channel::decode(serde_json::from_reader(response)?)
+		Channel::decode(response.json()?)
 	}
 
 	/// Indicate typing on a channel for the next 5 seconds.
@@ -489,7 +483,7 @@ impl Discord {
 	) -> Result<Message> {
 		let map = SendMessage::__build(f);
 		let body = serde_json::to_string(&map)?;
-		let response = request!(self, post(body), "/channels/{}/messages", channel);
+		let response = request!(self, post(body.clone()), "/channels/{}/messages", channel);
 		from_reader(response)
 	}
 
@@ -510,7 +504,7 @@ impl Discord {
 		let body = serde_json::to_string(&map)?;
 		let response = request!(
 			self,
-			patch(body),
+			patch(body.clone()),
 			"/channels/{}/messages/{}",
 			channel,
 			message
@@ -589,7 +583,7 @@ impl Discord {
 		let body = serde_json::to_string(&map)?;
 		check_empty(request!(
 			self,
-			post(body),
+			post(body.clone()),
 			"/channels/{}/messages/bulk_delete",
 			channel
 		))
@@ -632,38 +626,42 @@ impl Discord {
 	) -> Result<Message> {
 		// use std::io::Write;
 
-		let url = match hyper::Url::parse(&format!(api_concat!("/channels/{}/messages"), channel)) {
+		let url = match reqwest_wrapper::Url::parse(&format!(api_concat!("/channels/{}/messages"), channel)) {
 			Ok(url) => url,
 			Err(_) => return Err(Error::Other("Invalid URL in send_file")),
 		};
 		// NB: We're NOT using the Hyper itegration of multipart in order not to wrestle with the openssl-sys dependency hell.
-		let cr = multipart::mock::ClientRequest::default();
-		let mut multi = multipart::client::Multipart::from_request(cr)?;
-		multi.write_text("content", text)?;
-		multi.write_stream("file", &mut file, Some(filename), None)?;
-		let http_buffer: multipart::mock::HttpBuffer = multi.send()?;
-		fn multipart_mime(bound: &str) -> hyper::mime::Mime {
-			use hyper::mime::{Attr, Mime, SubLevel, TopLevel, Value};
-			Mime(
-				TopLevel::Multipart,
-				SubLevel::Ext("form-data".into()),
-				vec![(Attr::Ext("boundary".into()), Value::Ext(bound.into()))],
-			)
-		}
+		// let cr = multipart::mock::ClientRequest::default();
+		// let mut multi = multipart::client::Multipart::from_request(cr)?;
+		// multi.write_text("content", text)?;
+		// multi.write_stream("file", &mut file, Some(filename), None)?;
+		// let http_buffer: multipart::mock::HttpBuffer = multi.send()?;
+		// fn multipart_mime(bound: &str) -> hyper::mime::Mime {
+		// 	use hyper::mime::{Attr, Mime, SubLevel, TopLevel, Value};
+		// 	Mime(
+		// 		TopLevel::Multipart,
+		// 		SubLevel::Ext("form-data".into()),
+		// 		vec![(Attr::Ext("boundary".into()), Value::Ext(bound.into()))],
+		// 	)
+		// }
+
+		todo!();
+
+		// let mut form = reqwest_wrapper::multipart::Form::new();
+		// form.part
+
 		//SSL
-		// let ssl = hyper_native_tls::NativeTlsClient::new().unwrap();
-		let ssl = hyper_rustls::TlsClient::new();
-		let connector = hyper::net::HttpsConnector::new(ssl);
-		let client = hyper::client::Client::with_connector(connector);
-		let request = client.request(hyper::method::Method::Post, url)
-				.header(hyper::header::Authorization(self.token.clone()))
-				.header(hyper::header::UserAgent(USER_AGENT.to_owned()))
-				.header(hyper::header::ContentType(multipart_mime(&http_buffer.boundary)))
-				.body(&http_buffer.buf[..]);
-		let response = request.send();
+		// let client = reqwest_wrapper::Client::new();
+		// let request = client.post(url)
+		// 		.header(reqwest_wrapper::header::AUTHORIZATION, self.token.clone())
+		// 		.header(reqwest_wrapper::header::USER_AGENT, USER_AGENT.to_owned())
+		// 		.multipart(form);
+		// 		// .header(hyper::ContentType(multipart_mime(&http_buffer.boundary)))
+		// 		// .body(&http_buffer.buf[..]);
+		// let response = request.send();
 		// request.write(&http_buffer.buf[..])?;
 
-		Message::decode(serde_json::from_reader(check_status(response)?)?)
+		// Message::decode(serde_json::from_reader(check_status(response)?)?)
 	}
 
 	/// Acknowledge this message as "read" by this client.
@@ -724,7 +722,7 @@ impl Discord {
 		let body = serde_json::to_string(&map)?;
 		check_empty(request!(
 			self,
-			put(body),
+			put(body.clone()),
 			"/channels/{}/permissions/{}",
 			channel,
 			id
@@ -944,7 +942,7 @@ impl Discord {
 			"icon": icon,
 		}};
 		let body = serde_json::to_string(&map)?;
-		let response = request!(self, post(body), "/guilds");
+		let response = request!(self, post(body.clone()), "/guilds");
 		from_reader(response)
 	}
 
@@ -968,7 +966,7 @@ impl Discord {
 	) -> Result<Server> {
 		let map = EditServer::__build(f);
 		let body = serde_json::to_string(&map)?;
-		let response = request!(self, patch(body), "/guilds/{}", server_id);
+		let response = request!(self, patch(body.clone()), "/guilds/{}", server_id);
 		from_reader(response)
 	}
 
@@ -995,7 +993,7 @@ impl Discord {
 			"image": image,
 		}};
 		let body = serde_json::to_string(&map)?;
-		let response = request!(self, post(body), "/guilds/{}/emojis", server);
+		let response = request!(self, post(body.clone()), "/guilds/{}/emojis", server);
 		from_reader(response)
 	}
 
@@ -1008,7 +1006,7 @@ impl Discord {
 			"name": name
 		}};
 		let body = serde_json::to_string(&map)?;
-		let response = request!(self, patch(body), "/guilds/{}/emojis/{}", server, emoji);
+		let response = request!(self, patch(body.clone()), "/guilds/{}/emojis/{}", server, emoji);
 		from_reader(response)
 	}
 
@@ -1058,26 +1056,26 @@ impl Discord {
 	pub fn get_invite(&self, invite: &str) -> Result<Invite> {
 		let invite = resolve_invite(invite);
 		let response = request!(self, get, "/invite/{}", invite);
-		Invite::decode(serde_json::from_reader(response)?)
+		Invite::decode(response.json()?)
 	}
 
 	/// Get the active invites for a server.
 	pub fn get_server_invites(&self, server: ServerId) -> Result<Vec<RichInvite>> {
 		let response = request!(self, get, "/guilds/{}/invites", server);
-		decode_array(serde_json::from_reader(response)?, RichInvite::decode)
+		decode_array(response.json()?, RichInvite::decode)
 	}
 
 	/// Get the active invites for a channel.
 	pub fn get_channel_invites(&self, channel: ChannelId) -> Result<Vec<RichInvite>> {
 		let response = request!(self, get, "/channels/{}/invites", channel);
-		decode_array(serde_json::from_reader(response)?, RichInvite::decode)
+		decode_array(response.json()?, RichInvite::decode)
 	}
 
 	/// Accept an invite. See `get_invite` for details.
 	pub fn accept_invite(&self, invite: &str) -> Result<Invite> {
 		let invite = resolve_invite(invite);
 		let response = request!(self, post, "/invite/{}", invite);
-		Invite::decode(serde_json::from_reader(response)?)
+		Invite::decode(response.json()?)
 	}
 
 	/// Create an invite to a channel.
@@ -1098,15 +1096,15 @@ impl Discord {
 			"temporary": temporary,
 		}};
 		let body = serde_json::to_string(&map)?;
-		let response = request!(self, post(body), "/channels/{}/invites", channel);
-		RichInvite::decode(serde_json::from_reader(response)?)
+		let response = request!(self, post(body.clone()), "/channels/{}/invites", channel);
+		RichInvite::decode(response.json()?)
 	}
 
 	/// Delete an invite. See `get_invite` for details.
 	pub fn delete_invite(&self, invite: &str) -> Result<Invite> {
 		let invite = resolve_invite(invite);
 		let response = request!(self, delete, "/invite/{}", invite);
-		Invite::decode(serde_json::from_reader(response)?)
+		Invite::decode(response.json()?)
 	}
 
 	/// Retrieve a member object for a server given the member's user id.
@@ -1162,7 +1160,7 @@ impl Discord {
 		let body = serde_json::to_string(&map)?;
 		check_empty(request!(
 			self,
-			patch(body),
+			patch(body.clone()),
 			"/guilds/{}/members/{}",
 			server,
 			user
@@ -1177,7 +1175,7 @@ impl Discord {
 		let body = serde_json::to_string(&map)?;
 		check_empty(request!(
 			self,
-			patch(body),
+			patch(body.clone()),
 			"/guilds/{}/members/@me/nick",
 			server
 		))
@@ -1197,7 +1195,7 @@ impl Discord {
 	/// Retrieve the list of roles for a server.
 	pub fn get_roles(&self, server: ServerId) -> Result<Vec<Role>> {
 		let response = request!(self, get, "/guilds/{}/roles", server);
-		decode_array(serde_json::from_reader(response)?, Role::decode)
+		decode_array(response.json()?, Role::decode)
 	}
 
 	/// Create a new role on a server.
@@ -1218,8 +1216,8 @@ impl Discord {
 			"mentionable": mentionable,
 		}};
 		let body = serde_json::to_string(&map)?;
-		let response = request!(self, post(body), "/guilds/{}/roles", server);
-		Role::decode(serde_json::from_reader(response)?)
+		let response = request!(self, post(body.clone()), "/guilds/{}/roles", server);
+		Role::decode(response.json()?)
 	}
 
 	/// Create a new role on a server.
@@ -1230,8 +1228,8 @@ impl Discord {
 	) -> Result<Role> {
 		let map = EditRole::__build(f);
 		let body = serde_json::to_string(&map)?;
-		let response = request!(self, post(body), "/guilds/{}/roles", server);
-		Role::decode(serde_json::from_reader(response)?)
+		let response = request!(self, post(body.clone()), "/guilds/{}/roles", server);
+		Role::decode(response.json()?)
 	}
 
 	/// Modify a role on a server.
@@ -1243,8 +1241,8 @@ impl Discord {
 	) -> Result<Role> {
 		let map = EditRole::__build(f);
 		let body = serde_json::to_string(&map)?;
-		let response = request!(self, patch(body), "/guilds/{}/roles/{}", server, role);
-		Role::decode(serde_json::from_reader(response)?)
+		let response = request!(self, patch(body.clone()), "/guilds/{}/roles/{}", server, role);
+		Role::decode(response.json()?)
 	}
 
 	/// Reorder the roles on a server.
@@ -1259,8 +1257,8 @@ impl Discord {
 			})
 			.collect();
 		let body = serde_json::to_string(&map)?;
-		let response = request!(self, patch(body), "/guilds/{}/roles", server);
-		decode_array(serde_json::from_reader(response)?, Role::decode)
+		let response = request!(self, patch(body.clone()), "/guilds/{}/roles", server);
+		decode_array(response.json()?, Role::decode)
 	}
 
 	/// Remove specified role from a server.
@@ -1273,8 +1271,8 @@ impl Discord {
 	pub fn create_private_channel(&self, recipient: UserId) -> Result<PrivateChannel> {
 		let map = json! {{ "recipient_id": recipient }};
 		let body = serde_json::to_string(&map)?;
-		let response = request!(self, post(body), "/users/@me/channels");
-		PrivateChannel::decode(serde_json::from_reader(response)?)
+		let response = request!(self, post(body.clone()), "/users/@me/channels");
+		PrivateChannel::decode(response.json()?)
 	}
 
 	/// Get the URL at which a user's avatar is located.
@@ -1284,11 +1282,8 @@ impl Discord {
 
 	/// Download a user's avatar.
 	pub fn get_user_avatar(&self, user: UserId, avatar: &str) -> Result<Vec<u8>> {
-		use std::io::Read;
-		let mut response = retry(|| self.client.get(&self.get_user_avatar_url(user, avatar)))?;
-		let mut vec = Vec::new();
-		response.read_to_end(&mut vec)?;
-		Ok(vec)
+		let response = retry(|| self.client.get(&self.get_user_avatar_url(user, avatar)))?;
+		Ok(response.bytes().as_ref().map_err(|e| Error::Other("ReqwestErrorUnmappable in `get_user_avatar()`"))?.to_vec())
 	}
 
 	/// Get information about a user.
@@ -1305,8 +1300,8 @@ impl Discord {
 			"recipient_id": recipient_id.0,
 		}};
 		let body = serde_json::to_string(&map)?;
-		let response = request!(self, post(body), "/users/@me/channels");
-		let json: serde_json::Value = from_reader(response)?;
+		let response = request!(self, post(body.clone()), "/users/@me/channels");
+		let json: serde_json::Value = response.json()?;
 		PrivateChannel::decode(json)
 	}
 
@@ -1331,7 +1326,7 @@ impl Discord {
 		// Then, send the profile patch.
 		let map = EditProfile::__apply(f, map);
 		let body = serde_json::to_string(&map)?;
-		let response = request!(self, patch(body), "/users/@me");
+		let response = request!(self, patch(body.clone()), "/users/@me");
 		from_reader(response)
 	}
 
@@ -1361,8 +1356,8 @@ impl Discord {
 		// Then, send the profile patch.
 		let map = EditUserProfile::__apply(f, map);
 		let body = serde_json::to_string(&map)?;
-		let response = request!(self, patch(body), "/users/@me");
-		let mut json: Object = serde_json::from_reader(response)?;
+		let response = request!(self, patch(body.clone()), "/users/@me");
+		let mut json: Object = response.json()?;
 
 		// If a token was included in the response, switch to it. Important because if the
 		// password was changed, the old token is invalidated.
@@ -1389,7 +1384,7 @@ impl Discord {
 		let body = serde_json::to_string(&map)?;
 		check_empty(request!(
 			self,
-			patch(body),
+			patch(body.clone()),
 			"/guilds/{}/members/{}",
 			server,
 			user
@@ -1402,7 +1397,7 @@ impl Discord {
 	pub fn begin_server_prune(&self, server: ServerId, days: u16) -> Result<ServerPrune> {
 		let map = json! {{ "days": days }};
 		let body = serde_json::to_string(&map)?;
-		let response = request!(self, post(body), "/guilds/{}/prune", server);
+		let response = request!(self, post(body.clone()), "/guilds/{}/prune", server);
 		from_reader(response)
 	}
 
@@ -1412,7 +1407,7 @@ impl Discord {
 	pub fn get_server_prune_count(&self, server: ServerId, days: u16) -> Result<ServerPrune> {
 		let map = json! {{ "days": days }};
 		let body = serde_json::to_string(&map)?;
-		let response = request!(self, get(body), "/guilds/{}/prune", server);
+		let response = request!(self, get(body.clone()), "/guilds/{}/prune", server);
 		from_reader(response)
 	}
 
@@ -1424,7 +1419,7 @@ impl Discord {
 	pub fn edit_note(&self, user: UserId, note: &str) -> Result<()> {
 		let map = json! {{ "note": note }};
 		let body = serde_json::to_string(&map)?;
-		check_empty(request!(self, put(body), "/users/@me/notes/{}", user))
+		check_empty(request!(self, put(body.clone()), "/users/@me/notes/{}", user))
 	}
 
 	/// Retrieves information about the application and the owner.
@@ -1439,7 +1434,7 @@ impl Discord {
 	/// This endpoint is only available for bots.
 	pub fn suggested_shard_count(&self) -> Result<u64> {
 		let response = request!(self, get, "/gateway/bot");
-		let mut value: Object = serde_json::from_reader(response)?;
+		let mut value: Object = response.json()?;
 		match value.remove("shards") {
 			Some(value) => match value.as_u64() {
 				Some(shards) => Ok(shards),
@@ -1489,7 +1484,7 @@ impl Discord {
 
 	fn get_gateway_url(&self) -> Result<String> {
 		let response = request!(self, get, "/gateway");
-		let mut value: BTreeMap<String, String> = serde_json::from_reader(response)?;
+		let mut value: BTreeMap<String, String> = response.json()?;
 		match value.remove("url") {
 			Some(url) => Ok(url),
 			None => Err(Error::Protocol("Response missing \"url\" in Discord::get_gateway_url()"))
@@ -1497,8 +1492,8 @@ impl Discord {
 	}
 }
 
-fn from_reader<T: serde::de::DeserializeOwned, R: std::io::Read>(r: R) -> Result<T> {
-	serde_json::from_reader(r).map_err(From::from)
+fn from_reader<T: serde::de::DeserializeOwned>(r: reqwest_wrapper::Response) -> Result<T> {
+	r.json().map_err(From::from)
 }
 
 /// Read an image from a file into a string suitable for upload.
@@ -1525,7 +1520,7 @@ pub fn read_image<P: AsRef<::std::path::Path>>(path: P) -> Result<String> {
 pub fn get_unresolved_incidents() -> Result<Vec<Incident>> {
 	let client = tls_client();
 	let response = retry(|| client.get(status_concat!("/incidents/unresolved.json")))?;
-	let mut json: Object = serde_json::from_reader(response)?;
+	let mut json: Object = response.json()?;
 
 	match json.remove("incidents") {
 		Some(incidents) => decode_array(incidents, Incident::decode),
@@ -1539,7 +1534,7 @@ pub fn get_active_maintenances() -> Result<Vec<Maintenance>> {
 	let response = check_status(retry(|| {
 		client.get(status_concat!("/scheduled-maintenances/active.json"))
 	}))?;
-	let mut json: Object = serde_json::from_reader(response)?;
+	let mut json: Object = response.json()?;
 
 	match json.remove("scheduled_maintenances") {
 		Some(scheduled_maintenances) => decode_array(scheduled_maintenances, Maintenance::decode),
@@ -1553,7 +1548,7 @@ pub fn get_upcoming_maintenances() -> Result<Vec<Maintenance>> {
 	let response = check_status(retry(|| {
 		client.get(status_concat!("/scheduled-maintenances/upcoming.json"))
 	}))?;
-	let mut json: Object = serde_json::from_reader(response)?;
+	let mut json: Object = response.json()?;
 
 	match json.remove("scheduled_maintenances") {
 		Some(scheduled_maintenances) => decode_array(scheduled_maintenances, Maintenance::decode),
@@ -1575,30 +1570,34 @@ pub enum GetMessages {
 
 /// Send a request with the correct `UserAgent`, retrying it a second time if the
 /// connection is aborted the first time.
-fn retry<'a, F: Fn() -> hyper::client::RequestBuilder<'a>>(
+fn retry<F: Fn() -> reqwest_wrapper::RequestBuilder>(
 	f: F,
-) -> hyper::Result<hyper::client::Response> {
+) -> reqwest_wrapper::Result<reqwest_wrapper::Response> {
 	let f2 = || {
-		f().header(hyper::header::UserAgent(USER_AGENT.to_owned()))
-			.send()
+		f().header(reqwest_wrapper::header::USER_AGENT, USER_AGENT.to_owned()).send()
 	};
 	// retry on a ConnectionAborted, which occurs if it's been a while since the last request
-	match f2() {
-		Err(hyper::error::Error::Io(ref io))
-			if io.kind() == std::io::ErrorKind::ConnectionAborted =>
-		{
-			f2()
-		}
-		other => other,
+	let result = f2();
+	if result.is_err() {
+		// Should be ConnectionAborted in hyper? No clue so I'll just use this for now
+		// TODO
+		// if result.as_ref().unwrap_err().is_timeout() {
+		// 	f2()
+		// } else {
+		// 	result
+		// }
+		f2()
+	} else {
+		result
 	}
 }
 
 /// Convert non-success hyper statuses to discord crate errors, tossing info.
 fn check_status(
-	response: hyper::Result<hyper::client::Response>,
-) -> Result<hyper::client::Response> {
-	let response: hyper::client::Response = response?;
-	if !response.status.is_success() {
+	response: reqwest_wrapper::Result<reqwest_wrapper::Response>,
+) -> Result<reqwest_wrapper::Response> {
+	let response: reqwest_wrapper::Response = response?;
+	if !response.status().is_success() {
 		return Err(Error::from_response(response));
 	}
 	Ok(response)
@@ -1606,15 +1605,13 @@ fn check_status(
 
 /// Validate a request that is expected to return 204 No Content and print
 /// debug information if it does not.
-fn check_empty(mut response: hyper::client::Response) -> Result<()> {
-	if response.status != hyper::status::StatusCode::NoContent {
-		use std::io::Read;
-		debug!("Expected 204 No Content, got {}", response.status);
-		for header in response.headers.iter() {
-			debug!("Header: {}", header);
+fn check_empty(mut response: reqwest_wrapper::Response) -> Result<()> {
+	if response.status() != reqwest_wrapper::StatusCode::NO_CONTENT {
+		debug!("Expected 204 No Content, got {}", response.status());
+		for header in response.headers() {
+			debug!("Header: {:?}", header);
 		}
-		let mut content = String::new();
-		response.read_to_string(&mut content)?;
+		let content = response.text()?;
 		debug!("Content: {}", content);
 	}
 	Ok(())
@@ -1681,10 +1678,10 @@ impl Timer {
 
 mod internal {
 	pub enum Status {
-		SendMessage(::serde_json::Value),
+		SendMessage(serde_json::Value),
 		Sequence(u64),
 		ChangeInterval(u64),
-		ChangeSender(::connection::WebSocketTyped),
+		ChangeSender(crate::connection::WebSocketTyped),
 		Aborted,
 	}
 }

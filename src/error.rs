@@ -1,5 +1,4 @@
 use chrono::ParseError as ChronoError;
-use hyper::Error as HyperError;
 #[cfg(feature = "voice")]
 use opus::Error as OpusError;
 use serde_json::Error as JsonError;
@@ -8,15 +7,17 @@ use std::error::Error as StdError;
 use std::fmt::Display;
 use std::io::Error as IoError;
 use tungstenite::error::Error as WebSocketError;
+use crate::reqwest_wrapper;
+use reqwest_wrapper::Error as ReqwestError;
 
 /// Discord API `Result` alias type.
-pub type Result<T> = ::std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// Discord API error type.
 #[derive(Debug)]
 pub enum Error {
 	/// A `hyper` crate error
-	Hyper(HyperError),
+	Reqwest(ReqwestError),
 	/// A `chrono` crate error
 	Chrono(ChronoError),
 	/// A `serde_json` crate error
@@ -33,7 +34,7 @@ pub enum Error {
 	/// A json decoding error, with a description and the offending value
 	Decode(&'static str, Value),
 	/// A generic non-success response from the REST API
-	Status(::hyper::status::StatusCode, Option<Value>),
+	Status(reqwest_wrapper::StatusCode, Option<Value>),
 	/// A rate limit error, with how many milliseconds to wait before retrying
 	RateLimited(u64),
 	/// A Discord protocol error, with a description
@@ -46,10 +47,10 @@ pub enum Error {
 
 impl Error {
 	#[doc(hidden)]
-	pub fn from_response(response: ::hyper::client::Response) -> Error {
-		let status = response.status;
-		let value = ::serde_json::from_reader(response).ok();
-		if status == ::hyper::status::StatusCode::TooManyRequests {
+	pub fn from_response(response: reqwest_wrapper::Response) -> Error {
+		let status = response.status();
+		let value = response.json().ok();
+		if status == reqwest_wrapper::StatusCode::TOO_MANY_REQUESTS {
 			if let Some(Value::Object(ref map)) = value {
 				if let Some(delay) = map.get("retry_after").and_then(|v| v.as_u64()) {
 					return Error::RateLimited(delay);
@@ -66,9 +67,9 @@ impl From<IoError> for Error {
 	}
 }
 
-impl From<HyperError> for Error {
-	fn from(err: HyperError) -> Error {
-		Error::Hyper(err)
+impl From<ReqwestError> for Error {
+	fn from(err: ReqwestError) -> Error {
+		Error::Reqwest(err)
 	}
 }
 
@@ -101,7 +102,7 @@ impl Display for Error {
 	#[allow(deprecated)]
 	fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
 		match *self {
-			Error::Hyper(ref inner) => inner.fmt(f),
+			Error::Reqwest(ref inner) => inner.fmt(f),
 			Error::Chrono(ref inner) => inner.fmt(f),
 			Error::Json(ref inner) => inner.fmt(f),
 			Error::WebSocket(ref inner) => inner.fmt(f),
@@ -118,7 +119,7 @@ impl StdError for Error {
 	#[allow(deprecated)]
 	fn description(&self) -> &str {
 		match *self {
-			Error::Hyper(ref inner) => inner.description(),
+			Error::Reqwest(ref inner) => inner.description(),
 			Error::Chrono(ref inner) => inner.description(),
 			Error::Json(ref inner) => inner.description(),
 			Error::WebSocket(ref inner) => inner.description(),
@@ -137,7 +138,7 @@ impl StdError for Error {
 
 	fn cause(&self) -> Option<&dyn StdError> {
 		match *self {
-			Error::Hyper(ref inner) => Some(inner),
+			Error::Reqwest(ref inner) => Some(inner),
 			Error::Chrono(ref inner) => Some(inner),
 			Error::Json(ref inner) => Some(inner),
 			Error::WebSocket(ref inner) => Some(inner),

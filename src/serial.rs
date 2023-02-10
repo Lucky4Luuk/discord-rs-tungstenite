@@ -102,20 +102,20 @@ pub fn deserialize_discrim<'d, D: Deserializer<'d>>(d: D) -> Result<u16, D::Erro
 /// Deserialize a single-field struct like a newtype struct.
 macro_rules! serial_single_field {
 	($typ:ident as $field:ident: $inner:path) => {
-		impl ::serde::Serialize for $typ {
-			fn serialize<S: ::serde::ser::Serializer>(
+		impl serde::Serialize for $typ {
+			fn serialize<S: serde::ser::Serializer>(
 				&self,
 				s: S,
-			) -> ::std::result::Result<S::Ok, S::Error> {
+			) -> std::result::Result<S::Ok, S::Error> {
 				self.$field.serialize(s)
 			}
 		}
 
-		impl<'d> ::serde::Deserialize<'d> for $typ {
-			fn deserialize<D: ::serde::de::Deserializer<'d>>(
+		impl<'d> serde::Deserialize<'d> for $typ {
+			fn deserialize<D: serde::de::Deserializer<'d>>(
 				d: D,
-			) -> ::std::result::Result<$typ, D::Error> {
-				<$inner as ::serde::de::Deserialize>::deserialize(d).map(|v| $typ { $field: v })
+			) -> std::result::Result<$typ, D::Error> {
+				<$inner as serde::de::Deserialize>::deserialize(d).map(|v| $typ { $field: v })
 			}
 		}
 	};
@@ -124,7 +124,7 @@ macro_rules! serial_single_field {
 /// Special support for the oddly complex `ReactionEmoji`.
 pub mod reaction_emoji {
 	use super::*;
-	use model::{EmojiId, ReactionEmoji};
+	use crate::model::{EmojiId, ReactionEmoji};
 
 	#[derive(Serialize)]
 	struct EmojiSer<'s> {
@@ -208,7 +208,7 @@ macro_rules! serial_names {
 			}
 		}
 
-		impl ::serial::named::NamedEnum for $typ {
+		impl crate::serial::named::NamedEnum for $typ {
 			fn name(&self) -> &'static str {
 				self.name()
 			}
@@ -275,7 +275,7 @@ macro_rules! serial_numbers {
 				}
 			}
 		}
-		impl ::serial::numeric::NumericEnum for $typ {
+		impl crate::serial::numeric::NumericEnum for $typ {
 			fn num(&self) -> u64 {
 				self.num()
 			}
@@ -294,22 +294,22 @@ macro_rules! serial_numbers {
 /// Support for using "named" or "numeric" as the default ser/de impl.
 macro_rules! serial_use_mapping {
 	($typ:ident, $which:ident) => {
-		impl ::serde::Serialize for $typ {
+		impl serde::Serialize for $typ {
 			#[inline]
-			fn serialize<S: ::serde::ser::Serializer>(
+			fn serialize<S: serde::ser::Serializer>(
 				&self,
 				s: S,
-			) -> ::std::result::Result<S::Ok, S::Error> {
-				::serial::$which::serialize(self, s)
+			) -> std::result::Result<S::Ok, S::Error> {
+				crate::serial::$which::serialize(self, s)
 			}
 		}
 
-		impl<'d> ::serde::Deserialize<'d> for $typ {
+		impl<'d> serde::Deserialize<'d> for $typ {
 			#[inline]
-			fn deserialize<D: ::serde::de::Deserializer<'d>>(
+			fn deserialize<D: serde::de::Deserializer<'d>>(
 				d: D,
-			) -> ::std::result::Result<$typ, D::Error> {
-				::serial::$which::deserialize(d)
+			) -> std::result::Result<$typ, D::Error> {
+				crate::serial::$which::deserialize(d)
 			}
 		}
 	};
